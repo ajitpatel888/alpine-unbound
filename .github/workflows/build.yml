@@ -1,0 +1,102 @@
+name: Build and Publish Unbound
+
+on:
+  schedule:
+    - cron: '0 2 * * *' # Automated nightly build (Defaults to Beta)
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: 'Build Type: Choose beta for testing, or release for production'
+        required: true
+        default: 'beta'
+        type: choice
+        options:
+          - beta
+          - release
+
+# Grants the workflow permission to commit files back to the repository
+permissions:
+  contents: write
+
+env:
+  DOCKER_IMAGE: starlord888/alpine-unbound
+  ALPINE_VERSION: '3.23.3'
+
+jobs:
+  check-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Fetch Latest Unbound Release
+        id: unbound_release
+        run: |
+          LATEST_TAG=$(curl -sSL https://api.github.com/repos/NLnetLabs/unbound/releases/latest | jq -r '.tag_name')
+          VERSION=${LATEST_TAG#release-}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          
+          SHA256_FILE_URL="https://nlnetlabs.nl/downloads/unbound/unbound-${VERSION}.tar.gz.sha256"
+          SHA256=$(curl -sSL $SHA256_FILE_URL | awk '{print $1}')
+          echo "sha256=$SHA256" >> $GITHUB_OUTPUT
+
+      - name: Archive build files to version folder
+        run: |
+          VERSION=${{ steps.unbound_release.outputs.version }}
+          
+          # Create the versioned directory
+          mkdir -p versions/$VERSION
+          
+          # Copy the three core build files into the new directory
+          cp Dockerfile entrypoint.sh unbound.conf versions/$VERSION/
+          
+          # Configure Git as the GitHub Actions bot
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          
+          # Stage the files
+          git add versions/$VERSION/
+          
+          # Commit and push only if there are new changes
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Archive configuration files for Unbound $VERSION" && git push)
+
+      - name: Determine Docker Tags
+        id: set_tags
+        run: |
+          VERSION=${{ steps.unbound_release.outputs.version }}
+          RUN_NUM=${{ github.run_number }}
+          
+          # If triggered manually and "release" is chosen
+          if [[ "${{ github.event.inputs.release_type }}" == "release" ]]; then
+            echo "tags=${{ env.DOCKER_IMAGE }}:${VERSION},${{ env.DOCKER_IMAGE }}:latest" >> $GITHUB_OUTPUT
+          
+          # If triggered automatically OR "beta" is chosen
+          else
+            echo "tags=${{ env.DOCKER_IMAGE }}:${VERSION}-beta.${RUN_NUM},${{ env.DOCKER_IMAGE }}:beta" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: true
+          sbom: true
+          build-args: |
+            ALPINE_VERSION=${{ env.ALPINE_VERSION }}
+            UNBOUND_VERSION=${{ steps.unbound_release.outputs.version }}
+            UNBOUND_SHA256=${{ steps.unbound_release.outputs.sha256 }}
+          tags: ${{ steps.set_tags.outputs.tags }}
