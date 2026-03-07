@@ -15,6 +15,7 @@ on:
 # Grants the workflow permission to commit files back to the repository
 permissions:
   contents: write
+  packages: write
 
 env:
   DOCKER_IMAGE: starlord888/alpine-unbound
