@@ -1,8 +1,6 @@
 name: Build and Publish Unbound
 
 on:
-  schedule:
-    - cron: '0 2 * * *' # Automated nightly build (Defaults to Beta)
   workflow_dispatch:
     inputs:
       release_type:
