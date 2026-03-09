@@ -28,13 +28,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Fetch Latest Unbound Release
+      - name: Fetch Latest Unbound Release (Hybrid Approach)
         id: unbound_release
         run: |
-          LATEST_TAG=$(curl -sSL https://api.github.com/repos/NLnetLabs/unbound/releases/latest | jq -r '.tag_name')
+          # 1. Use GitHub API (authenticated) to safely get the version string and prevent rate limiting
+          LATEST_TAG=$(curl -sSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/NLnetLabs/unbound/releases/latest | jq -r '.tag_name')
           VERSION=${LATEST_TAG#release-}
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           
+          # 2. Use the official NLnet Labs site to get the SHA256 checksum
           SHA256_FILE_URL="https://nlnetlabs.nl/downloads/unbound/unbound-${VERSION}.tar.gz.sha256"
           SHA256=$(curl -sSL $SHA256_FILE_URL | awk '{print $1}')
           echo "sha256=$SHA256" >> $GITHUB_OUTPUT
@@ -46,8 +48,8 @@ jobs:
           # Create the versioned directory
           mkdir -p versions/$VERSION
           
-          # Copy the three core build files into the new directory
-          cp Dockerfile entrypoint.sh unbound.conf versions/$VERSION/
+          # Copy the core build files AND the new modular directories into the new directory
+          cp -r Dockerfile entrypoint.sh healthcheck.sh unbound.conf conf.d zones.d certs.d log.d versions/$VERSION/ || true
           
           # Configure Git as the GitHub Actions bot
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
@@ -79,23 +81,3 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Build and push
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          provenance: true
-          sbom: true
-          build-args: |
-            ALPINE_VERSION=${{ env.ALPINE_VERSION }}
-            UNBOUND_VERSION=${{ steps.unbound_release.outputs.version }}
-            UNBOUND_SHA256=${{ steps.unbound_release.outputs.sha256 }}
-          tags: ${{ steps.set_tags.outputs.tags }}
