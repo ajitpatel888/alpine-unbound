@@ -2,29 +2,19 @@
 # Stage 1: Builder
 # ==============================================================================
 ARG ALPINE_VERSION=3.23.3
-
 FROM alpine:${ALPINE_VERSION} AS builder
 
-# Default values (overridden by GitHub Actions during build)
 ARG UNBOUND_VERSION=1.24.2
 ARG UNBOUND_SHA256=44e7b53e008a6dcaec03032769a212b46ab5c23c105284aa05a4f3af78e59cdb
-
 ENV UNBOUND_DOWNLOAD_URL=https://nlnetlabs.nl/downloads/unbound/unbound-${UNBOUND_VERSION}.tar.gz
 
 WORKDIR /tmp/src
 
 RUN apk upgrade --no-cache && \
     apk add --no-cache \
-    build-base \
-    bison \
-    flex \
-    curl \
-    expat-dev \
-    libevent-dev \
-    nghttp2-dev \
-    openssl-dev \
-    protobuf-c-dev \
-    fstrm-dev
+    build-base bison flex curl expat-dev libevent-dev \
+    nghttp2-dev openssl-dev protobuf-c-dev fstrm-dev \
+    hiredis-dev libsodium-dev python3-dev swig
 
 RUN curl -sSL $UNBOUND_DOWNLOAD_URL -o unbound.tar.gz && \
     echo "${UNBOUND_SHA256}  unbound.tar.gz" | sha256sum -c - && \
@@ -39,11 +29,18 @@ RUN curl -sSL $UNBOUND_DOWNLOAD_URL -o unbound.tar.gz && \
         --with-username=_unbound \
         --with-libevent \
         --with-libnghttp2 \
+        --with-libhiredis \
+        --with-pythonmodule \
+        --with-pyunbound \
         --enable-dnstap \
+        --enable-dnscrypt \
+        --enable-cachedb \
+        --enable-subnet \
         --enable-tfo-server \
         --enable-tfo-client \
         --enable-event-api \
-        --enable-subnet && \
+        --enable-pie \
+        --enable-relro-now && \
     make -j$(nproc) install
 
 # ==============================================================================
@@ -51,45 +48,42 @@ RUN curl -sSL $UNBOUND_DOWNLOAD_URL -o unbound.tar.gz && \
 # ==============================================================================
 FROM alpine:${ALPINE_VERSION}
 
-# Re-declare ARG in Stage 2 to use it for labels
 ARG UNBOUND_VERSION=1.24.2
 
 LABEL org.opencontainers.image.version="${UNBOUND_VERSION}" \
       org.opencontainers.image.title="alpine-unbound" \
-      org.opencontainers.image.description="A validating, recursive, and caching DNS resolver built strictly from source on Alpine"
+      org.opencontainers.image.description="A complete, fully-featured validating, recursive, and caching DNS resolver built strictly from source on Alpine"
 
 WORKDIR /opt/unbound
 
 COPY --from=builder /opt/unbound /opt/unbound
 
-# Install dependencies (includes ldns for the drill health check)
+# Install runtime dependencies including those for Python, Redis, and DNSCrypt
 RUN apk upgrade --no-cache && \
     apk add --no-cache \
-    ca-certificates \
-    wget \
-    expat \
-    fstrm \
-    ldns \
-    libevent \
-    nghttp2-libs \
-    openssl \
-    protobuf-c && \
+    ca-certificates wget expat fstrm ldns libevent nghttp2-libs \
+    openssl protobuf-c hiredis libsodium python3 tini tzdata su-exec && \
     addgroup -S _unbound && \
-    adduser -S -G _unbound -H -h /opt/unbound _unbound
+    adduser -S -G _unbound -H -h /opt/unbound _unbound && \
+    mkdir -p /opt/unbound/etc/unbound/conf.d \
+             /opt/unbound/etc/unbound/zones.d \
+             /opt/unbound/etc/unbound/certs.d \
+             /opt/unbound/etc/unbound/log.d && \
+    chown -R _unbound:_unbound /opt/unbound/etc/unbound
 
 COPY entrypoint.sh /entrypoint.sh
+COPY healthcheck.sh /opt/unbound/sbin/healthcheck.sh
 COPY unbound.conf /opt/unbound/etc/unbound/unbound.conf
 
-RUN chmod +x /entrypoint.sh
+RUN chmod +x /entrypoint.sh /opt/unbound/sbin/healthcheck.sh
 
 ENV PATH=/opt/unbound/sbin:"$PATH"
 
-# Expose port 5335 for integration with ad-blockers
 EXPOSE 5335/tcp
 EXPOSE 5335/udp
 
-# Using drill (via ldns) to health-check the custom port
-HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD drill -p 5335 cloudflare.com @127.0.0.1 > /dev/null || exit 1
+HEALTHCHECK --interval=30s --timeout=15s --start-period=10s --retries=3 \
+    CMD /opt/unbound/sbin/healthcheck.sh
 
-ENTRYPOINT ["/entrypoint.sh"]
+# Use tini as the init system to properly handle OS signals
+ENTRYPOINT ["/sbin/tini", "--", "/entrypoint.sh"]
